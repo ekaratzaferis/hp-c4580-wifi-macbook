@@ -20,6 +20,7 @@ from PIL import Image
 
 PRINTER_IP = '192.168.1.109'
 SCAN_PORT = 9290
+STALL_TIMEOUT = 60  # seconds of silence (incl. warm-up) before giving up on a scan
 
 
 def scan_raw(ip, dpi=75):
@@ -63,25 +64,51 @@ def scan_raw(ip, dpi=75):
 
     expected_mb = round(8.5 * 11 * dpi * dpi * 3 / 1_000_000, 1)
     print(f"Scan started at {dpi} DPI (expect ~{expected_mb} MB, may take a few minutes)...")
-    chunks = []
-    total = 0
-    s.settimeout(30)  # long timeout before first chunk (scanner is warming up)
+    buf = bytearray()
+    walk_pos, seen_first, done = 0, False, False
+    # The scanner can pause mid-page (carriage/buffer stalls), so a quiet socket
+    # is not the end of the scan; only the end-of-page block is.
+    s.settimeout(STALL_TIMEOUT)
     try:
-        while True:
-            chunk = s.recv(65536)
+        while not done:
+            try:
+                chunk = s.recv(65536)
+            except socket.timeout:
+                raise RuntimeError(
+                    f"Scanner sent no data for {STALL_TIMEOUT}s before the end of the page "
+                    f"({len(buf)/1_000_000:.1f} / ~{expected_mb} MB received).")
             if not chunk:
                 break
-            chunks.append(chunk)
-            total += len(chunk)
-            print(f"\r  Received: {total/1_000_000:.1f} / ~{expected_mb} MB", end='', flush=True)
-            s.settimeout(5)  # short timeout once data is flowing
-    except socket.timeout:
-        pass
+            buf += chunk
+            walk_pos, seen_first, done = _walk_blocks(buf, walk_pos, seen_first)
+            print(f"\r  Received: {len(buf)/1_000_000:.1f} / ~{expected_mb} MB", end='', flush=True)
+
+        # Drain anything trailing the end-of-page block so the scanner finishes the job cleanly
+        s.settimeout(2)
+        try:
+            while s.recv(65536):
+                pass
+        except socket.timeout:
+            pass
     finally:
         s.close()
 
-    print(f"\r  Received: {total/1_000_000:.1f} MB — done.              ")
-    return b''.join(chunks)
+    print(f"\r  Received: {len(buf)/1_000_000:.1f} MB — done.              ")
+    return bytes(buf)
+
+
+def _walk_blocks(data, pos, seen_first):
+    """Advance over complete MFPDTF blocks. Returns (pos, seen_first, end_of_page_seen)."""
+    while pos + 8 <= len(data):
+        block_len = struct.unpack_from('<I', data, pos)[0]
+        if block_len == 0 or pos + block_len > len(data):
+            break
+        # First block is start-of-page metadata, matching parse_mfpdtf
+        if seen_first and data[pos + 7] == 0x1a:
+            return pos + block_len, True, True
+        seen_first = True
+        pos += block_len
+    return pos, seen_first, False
 
 
 def parse_mfpdtf(data):
@@ -143,14 +170,28 @@ def build_image(pixels, width, height):
     return Image.frombytes('RGB', (width, height), pixels)
 
 
-def save_output(img, path, dpi):
-    ext = path.rsplit('.', 1)[-1].lower() if '.' in path else 'png'
-    if ext == 'pdf':
-        img.save(path, 'PDF', resolution=dpi)
-        print(f"Saved PDF: {path}")
+def file_ext(path):
+    return path.rsplit('.', 1)[-1].lower() if '.' in path else 'png'
+
+
+def save_output(images, path, dpi):
+    if file_ext(path) == 'pdf':
+        # Pages are embedded as JPEG; Pillow's default quality (75) visibly smears text
+        images[0].save(path, 'PDF', resolution=dpi, save_all=True, append_images=images[1:],
+                       quality=92)
+        print(f"Saved {len(images)}-page PDF: {path}")
     else:
-        img.save(path, 'PNG')
+        images[0].save(path, 'PNG')
         print(f"Saved PNG: {path}")
+
+
+def scan_page(ip, dpi):
+    raw = scan_raw(ip, dpi)
+    print("Parsing scan data...")
+    pixels, width, height = parse_mfpdtf(raw)
+    print(f"Image dimensions: {width}x{height} px at {dpi} DPI "
+          f"({width/dpi:.1f}\" x {height/dpi:.1f}\")")
+    return build_image(pixels, width, height)
 
 
 def main():
@@ -159,16 +200,38 @@ def main():
     parser.add_argument('--dpi', type=int, default=75, choices=[75, 100, 150, 200, 300],
                         help='Scan resolution in DPI (default: 75)')
     parser.add_argument('--ip', default=PRINTER_IP, help=f'Printer IP (default: {PRINTER_IP})')
+    parser.add_argument('--pages', type=int, default=1,
+                        help='Number of pages to scan into one PDF (default: 1)')
     args = parser.parse_args()
 
-    raw = scan_raw(args.ip, args.dpi)
-    print("Parsing scan data...")
-    pixels, width, height = parse_mfpdtf(raw)
-    print(f"Image dimensions: {width}x{height} px at {args.dpi} DPI "
-          f"({width/args.dpi:.1f}\" x {height/args.dpi:.1f}\")")
+    if args.pages < 1:
+        parser.error('--pages must be at least 1')
+    if args.pages > 1 and file_ext(args.output) != 'pdf':
+        parser.error('--pages > 1 requires a .pdf output file')
 
-    img = build_image(pixels, width, height)
-    save_output(img, args.output, args.dpi)
+    images = []
+    try:
+        for n in range(1, args.pages + 1):
+            if args.pages > 1:
+                print(f"\n=== Page {n} of {args.pages} ===")
+                if n > 1:
+                    input(f"Place page {n} on the glass and press Enter...")
+            while True:
+                try:
+                    images.append(scan_page(args.ip, args.dpi))
+                    break
+                except (OSError, RuntimeError) as e:
+                    print(f"\nScan failed: {e}")
+                    if args.pages == 1:
+                        sys.exit(1)
+                    input(f"Press Enter to retry page {n} (Ctrl+C to save pages so far)...")
+    except (KeyboardInterrupt, EOFError):
+        print()
+        if not images:
+            sys.exit(130)
+        print(f"Stopped early — saving the {len(images)} page(s) scanned so far.")
+
+    save_output(images, args.output, args.dpi)
 
 
 if __name__ == '__main__':

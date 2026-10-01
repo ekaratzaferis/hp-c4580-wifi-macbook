@@ -55,6 +55,26 @@ python3 hp_scan.py scan.png --dpi 300
 python3 hp_scan.py scan.png --ip 192.168.1.200
 ```
 
+### Global commands
+
+Link the scripts in `bin/` onto your `PATH`:
+
+```bash
+ln -s "$PWD/bin/scan-pdf" ~/.local/bin/scan-pdf
+ln -s "$PWD/bin/scan-img" ~/.local/bin/scan-img
+```
+
+Then, from any terminal:
+
+```bash
+scan-pdf             # 150 DPI PDF → ~/Desktop/scan_<timestamp>.pdf
+scan-pdf 4           # 4 pages, prompts you to swap pages, merged into one PDF
+scan-img             # 300 DPI PNG → ~/Desktop/scan_<timestamp>.png
+scan-img --dpi 150   # extra args are passed to hp_scan.py
+```
+
+Both commands use the project's `.venv` if it exists, and open the file when the scan finishes.
+
 ### Double-click shortcuts
 
 - **`Scan to PNG.command`** — 300 DPI, saves timestamped PNG, opens automatically

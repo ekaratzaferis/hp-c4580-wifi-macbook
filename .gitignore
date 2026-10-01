@@ -8,3 +8,6 @@ __pycache__/
 # Scan output files
 scan_*.png
 scan_*.pdf
+
+# Virtualenv
+.venv/

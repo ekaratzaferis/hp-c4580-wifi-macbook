@@ -1,0 +1,17 @@
+#!/bin/bash
+# Scan to a timestamped 150 DPI PDF on the Desktop. Extra args (e.g. --dpi 150) are passed through.
+#   scan-pdf        one page
+#   scan-pdf 4      four pages, prompting between each, merged into one PDF
+SELF="$(readlink "$0" || echo "$0")"
+DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+PY="$DIR/.venv/bin/python"
+[ -x "$PY" ] || PY=python3
+
+PAGES=1
+if [[ "$1" =~ ^[0-9]+$ ]]; then
+  PAGES="$1"
+  shift
+fi
+
+OUTPUT="$HOME/Desktop/scan_$(date +%Y%m%d_%H%M%S).pdf"
+"$PY" "$DIR/hp_scan.py" "$OUTPUT" --pages "$PAGES" --dpi 150 "$@" && open "$OUTPUT"

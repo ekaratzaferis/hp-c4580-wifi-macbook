@@ -1,0 +1,8 @@
+#!/bin/bash
+# Scan to a timestamped 300 DPI PNG on the Desktop. Extra args (e.g. --dpi 150) are passed through.
+SELF="$(readlink "$0" || echo "$0")"
+DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+PY="$DIR/.venv/bin/python"
+[ -x "$PY" ] || PY=python3
+OUTPUT="$HOME/Desktop/scan_$(date +%Y%m%d_%H%M%S).png"
+"$PY" "$DIR/hp_scan.py" "$OUTPUT" --dpi 300 "$@" && open "$OUTPUT"
